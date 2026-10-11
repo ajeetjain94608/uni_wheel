@@ -23,27 +23,58 @@ Two references were used here, for different reasons:
    motor control. Also where you empirically determine the IMU axis mapping and
    sign (can't be known from simulation — depends on physical mounting).
 2. **`static_inference_test/`** — verify the trained policy's C export runs
-   correctly on-device, in isolation from sensors/motors. Needs `actor.h`, which
-   doesn't exist yet — see below.
-3. **`uniwheel_bot/`** — the full closed loop.
+   correctly on-device, in isolation from sensors/motors. `actor.h` (generated
+   via `export_actor_onnx()` in `rl/ppo_trainer.py` + `rl/onnx_actor_to_c.py`)
+   is already in this folder and in `uniwheel_bot/`, wired for stage 05's
+   7-input policy.
+3. **`motor_spin_test/`** — isolate motor control from the policy: verify
+   voltage-mode FOC spins the drive wheel cleanly before trusting it in the
+   closed loop. See "Motor control" below.
+4. **`uniwheel_bot/`** — the full closed loop.
 
 ## Libraries (Arduino IDE Library Manager)
 - `Simple FOC` (askuric)
 - `MPU6050_tockn`
 
+## Motor control: voltage mode, confirmed good
+
+`uniwheel_bot.ino` drives both motors with SimpleFOC's voltage-mode torque
+control (`TorqueControlType::voltage` + `MotionControlType::torque` +
+`motor.move(volts)`) — no current sensing. This was checked in isolation two
+ways before trusting it in the full closed loop: `motor_spin_test.ino`
+(angle-mode control, but same voltage-mode FOC underneath) and
+`../reaction_wheel_unicycle/` (a full balance loop, same voltage-mode torque
+control, proven-working third-party reference). Both confirmed the
+driver/motor/pin setup itself spins cleanly — so that part of the config is
+not in question.
+
+What *was* wrong: `uniwheel_bot.ino`'s main loop used to busy-wait its entire
+body — including `motor_wheel.loopFOC()`/`motor_reaction_wheel.loopFOC()`,
+SimpleFOC's commutation update — down to the policy's control rate
+(`TIMESTEP` = 5ms / 200Hz). That starves voltage-mode FOC, which needs to run
+much faster than 200Hz to stay smooth, and is almost certainly what the
+`MOTOR_DIR_REACTION_WHEEL` comment in the file describes as a "starting-
+torque/cogging symptom" (that wheel needing a hand-nudge before it would spin
+under motor power). `reaction_wheel_unicycle.ino` never throttles `loopFOC()`
+at all — it runs every iteration as fast as the hardware allows, and only
+gates the control-law update behind a loop counter. `uniwheel_bot.ino` now
+does the same: both encoders' `.update()` + both motors' `.loopFOC()` run
+unthrottled every iteration, and only the sensor-fusion/policy/new-target
+block is gated to `TIMESTEP` via a non-blocking elapsed-time check. Worth
+re-testing the reaction wheel's cold-start behavior now that FOC isn't being
+throttled — this may well have fixed it outright.
+
 ## What's not done yet
-- **`actor.h` doesn't exist.** Once training (stage 02) reaches a checkpoint you're
-  happy with: export it with `export_actor_onnx()` in `rl/ppo_trainer.py`, then
-  `python3 rl/onnx_actor_to_c.py <path>.onnx actor.h`, then copy the result into
-  `static_inference_test/` and `uniwheel_bot/`.
-- **Calibration constants in `uniwheel_bot.ino` are unfilled placeholders**, marked
-  clearly in the file — IMU axis/sign mapping and motor spin direction. These are
-  real unknowns until measured on your actual hardware via `sensor_test.ino`, not
-  defaults safe to leave as-is. Getting them wrong means the robot actively fights
-  itself rather than balancing, not just "works a bit worse."
-- **Pin scheme is mcdgf's, not yet confirmed against your actual wiring.** Check it
-  matches before flashing.
-- **`VOLTAGE_LIMIT = 6.0f`** is mcdgf's proven-working value for their 2804 motor +
-  SimpleFOC Mini + 12V supply (same motor family as our FIT1034), used as a
-  conservative starting point since there's no hardware here to tune it against —
-  worth revisiting once you can actually test it.
+- **End-to-end validation of the full closed loop** (balance, not just motor
+  spin) hasn't happened on this hardware yet — `uniwheel_bot.ino` is believed
+  ready to try, not yet confirmed holding balance for real.
+- **`VOLTAGE_LIMIT = 6.0f`** is mcdgf's proven-working value for their 2804
+  motor + SimpleFOC Mini + 12V supply (same motor family as our FIT1034),
+  used as a conservative starting point — worth revisiting once you can tune
+  it against real balance behavior (too low and the policy can't produce
+  enough corrective torque; too high risks overcurrent on a stall).
+- **Reaction wheel's own `initFOC()` status and direction sign are still only
+  hand-spin-inferred**, not powered-confirmed (see the comment above
+  `MOTOR_DIR_REACTION_WHEEL` in `uniwheel_bot.ino`) — re-test now that FOC
+  runs unthrottled, since the previous inconclusive powered test may have
+  been a symptom of the throttling itself rather than a real direction issue.

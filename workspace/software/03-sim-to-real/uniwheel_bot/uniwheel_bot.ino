@@ -29,6 +29,27 @@
  *      direction command more than a precise speed dial until that's improved.
  * ============================================================================
  *
+ * MOTOR CONTROL CONFIRMED GOOD: voltage-mode torque control (TorqueControlType
+ * ::voltage + MotionControlType::torque + motor.move(volts)), as already used
+ * below, was verified smooth and correctly-commutated by running it stripped
+ * of everything else - motor_spin_test.ino (angle mode, same voltage-mode FOC
+ * underneath) and reaction_wheel_unicycle.ino (same voltage-mode torque
+ * control, full balance loop) both confirm the driver/motor/pin setup itself
+ * is right. So the SimpleFOC config below is NOT what changed - the loop
+ * *structure* was. Previously this loop busy-waited the ENTIRE body (sensor
+ * reads, policy inference, AND motor_wheel.loopFOC()/motor_reaction_wheel.
+ * loopFOC()) down to TIMESTEP=5ms/200Hz. loopFOC() is SimpleFOC's commutation
+ * update - throttling it to 200Hz starves voltage-mode FOC, which needs to
+ * run much faster to stay smooth (this is almost certainly what the
+ * MOTOR_DIR_REACTION_WHEEL comment below describes as a "starting-torque/
+ * cogging symptom" needing a hand-nudge to spin). reaction_wheel_unicycle.ino
+ * - the proven-good reference - never throttles loopFOC() at all: it calls it
+ * every single iteration as fast as the hardware allows, and only gates the
+ * control-law update (its Tuning()/angle_calc()/target-voltage computation)
+ * behind a loop counter. This file now does the equivalent with the two
+ * encoders, since SimpleFOC 2.x's loopFOC() commutates against whatever angle
+ * sensor.update() last cached rather than refreshing it itself - see loop().
+ *
  * (Bus 0 SDA/SCL matches the macolin007/mcdgf reference (SDA=21 SCL=22) - an
  * earlier version of this file had it swapped to 22/21 based on a wiring
  * report that turned out to be for a since-changed physical connection.
@@ -204,13 +225,27 @@ void setup() {
 }
 
 void loop() {
-  unsigned long step_start = micros();
-
-  mpu6050.update();
+  // Refresh both encoders and run FOC commutation every iteration, as fast
+  // as the hardware allows - NOT paced to TIMESTEP. This is what the
+  // proven-good voltage-mode examples do (see header comment) and it's what
+  // actually determines how smooth voltage-mode FOC feels; the policy's
+  // control rate below is a separate, much slower concern.
   sensor_wheel.update();
   sensor_reaction_wheel.update();
   motor_wheel.loopFOC();
   motor_reaction_wheel.loopFOC();
+
+  // Everything else - sensor fusion, the policy, new motor targets - only
+  // needs to run at TIMESTEP (matching the sim's control rate, which the
+  // policy was trained against). Gate it with a non-blocking elapsed-time
+  // check instead of busy-waiting, so loopFOC() above keeps running at full
+  // native speed in between control updates.
+  static unsigned long last_control = 0;
+  unsigned long now = micros();
+  if (now - last_control < (unsigned long)(TIMESTEP * 1e6f)) return;
+  last_control = now;
+
+  mpu6050.update();
 
   // Raw IMU: MPU6050_tockn reports accel in g's (ratio - no unit conversion
   // needed for atan2) and gyro in deg/s (DOES need conversion to rad/s to match
@@ -274,8 +309,4 @@ void loop() {
       Serial.println("Running...");
     }
   }
-
-  // Pace to TIMESTEP (matches the sim's control rate - the policy was trained
-  // expecting this timing, running faster or slower changes its effective gains)
-  while (micros() - step_start < (unsigned long)(TIMESTEP * 1e6f));
 }
