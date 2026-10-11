@@ -52,14 +52,29 @@ motor.foc_modulation = FOCModulationType::SpaceVectorPWM; // Use PWM drive
 motor.controller = MotionControlType::angle; // Angle mode
 
 // Velocity PI controller parameters
-motor.PID_velocity.P = 0.05f; // Velocity P value. This value should not be too large, otherwise it will cause jitter.
-motor.PID_velocity.I = 0.02; // A larger value will slow down the response.
+// RETUNED - the original P=0.05/I=0.02 here (inherited from a generic SimpleFOC
+// tutorial template, not tuned for this motor) was the cause of "needs a manual
+// push to start": with gains that low, the controller can't generate enough
+// corrective voltage near zero speed to break static friction/cogging on this
+// motor, so it sits there until a hand-push gets the rotor past stiction, then
+// the small gain barely sustains motion. These values are SimpleFOC's own
+// documented velocity-loop defaults (P=0.5, I=10 - see docs.simplefoc.com/
+// velocity_loop) blended with the community's tested starting point for
+// 2804/2808-class gimbal motors specifically (P=0.2, I=20 - same motor family
+// as our FIT1034). Still a starting point, not a guaranteed fit for this exact
+// mechanical load - if it oscillates/buzzes, back P off in ~20% steps; if it's
+// still sluggish to start, raise I first (it's what overcomes stiction here).
+// For a load-specific tune, use the Ziegler-Nichols procedure instead:
+// docs.simplefoc.com/zn_tuning_pid (set I=D=0, raise P until sustained
+// oscillation at gain Kc/period Tc, then P=0.45*Kc, I=0.54*Kc/Tc for PI).
+motor.PID_velocity.P = 0.3f;
+motor.PID_velocity.I = 15.0f;
 motor.PID_velocity.D = 0;
 // Maximum voltage to be set to the motor
 motor.voltage_limit = 6; // Limit the maximum voltage. This value is generally half the supply voltage.
 
-// Velocity low-pass filtering time constant
-// The lower the less filtered value
+// Velocity low-pass filtering time constant - unchanged, already in
+// SimpleFOC's own recommended 0.005-0.01s range (docs.simplefoc.com/velocity_loop)
 motor.LPF_velocity.Tf = 0.01f; // Filtering
 
 // Angle P controller
